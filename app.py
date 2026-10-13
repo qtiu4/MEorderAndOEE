@@ -139,7 +139,7 @@ def header_bar(subtitle, loaded_at):
         logo_html = f'<div class="cp-logo"><img src="data:image/{mime};base64,{b64}"></div>'
     now = datetime.now(TH_TZ)
     today = f"{now.day} {TH_MONTHS[now.month - 1]} {now.year + 543}"
-    st.markdown(f'<div class="cp-head">{logo_html}<div><div class="cp-title">OEE Operations</div>'
+    st.markdown(f'<div class="cp-head">{logo_html}<div><div class="cp-title">OEE (Overall Equipment Effectiveness)</div>'
                 f'<div class="cp-sub">{escape(subtitle)}</div></div>'
                 f'<div class="cp-date">{today}<small>อัปเดตข้อมูล {escape(loaded_at)}</small></div></div>',
                 unsafe_allow_html=True)
@@ -286,7 +286,7 @@ if ev.empty:
     st.stop()
 cmap = machine_color_map(ev["machine"].unique())
 
-header_bar(f"Mahanakorn Electric Wire · {m_from} – {m_to} · {', '.join(sel_machines)}", loaded_at)
+header_bar(f"ประสิทธิผลโดยรวมของเครื่องจักร · Mahanakorn Electric Wire · {m_from} – {m_to} · {', '.join(sel_machines)}", loaded_at)
 
 tab_oee, tab_total, tab_loss, tab_waste, tab_data = st.tabs(
     ["OEE แยกเครื่อง", "OEE รวมรายเดือน", "Time Loss", "Waste", "ตารางข้อมูล"])
