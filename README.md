@@ -7,6 +7,7 @@ Dashboard OEE, Time Loss และ Waste ที่ดึงข้อมูลจ
 |---|---|
 | `app.py` | หน้าจอ dashboard (แท็บ OEE แยกเครื่อง / OEE รวมรายเดือน / Time Loss / Waste / ตารางข้อมูล) |
 | `data.py` | ดึงข้อมูลจากชีตและคำนวณ A, P, Q, OEE |
+| `assets/makorn_logo.jpg` | โลโก้บริษัท (แสดงที่หัวหน้าและแถบด้านซ้าย) |
 | `requirements.txt` | รายชื่อแพ็กเกจที่ Streamlit Cloud ต้องติดตั้ง |
 | `.streamlit/secrets.toml.example` | ตัวอย่างค่าที่ต้องใส่ใน Secrets |
 
