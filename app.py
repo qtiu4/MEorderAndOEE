@@ -262,7 +262,7 @@ with st.sidebar:
     st.header("ตัวกรอง")
     months = sorted(events["month"].unique())
     month_labels = [pd.Timestamp(m).strftime("%b %Y") for m in months]
-       default_start = max(0, len(months) - 12)
+    default_start = max(0, len(months) - 12)
 
     # Month range: two dropdowns + a slider, kept in sync through session_state.
     ss = st.session_state
