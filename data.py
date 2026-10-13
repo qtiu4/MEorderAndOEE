@@ -14,7 +14,8 @@ import pandas as pd
 DEFAULT_SHEET_ID = "1LKTmEWT3AqRqeecplgLJlmDelN_z-tk9A1JKWEz-XwI"
 
 SHEETS = ["OEE_DATA", "OEE_FORM", "TimeLoss", "Waste"]
-OPTIONAL_SHEETS = ["OEE_Total"]  # used if present; the app still works without it
+ORDER_SHEET, WIP_SHEET, MASTER_SHEET = "ใบสั่งผลิต", "ใบสั่งผลิต WIP", "Master"
+OPTIONAL_SHEETS = ["OEE_Total", ORDER_SHEET, WIP_SHEET, MASTER_SHEET]  # used if present; the app still works without them
 
 # Column letters per sheet --------------------------------------------------
 COLS = {
@@ -39,6 +40,15 @@ COLS = {
         "ideal_hr": "F", "kg_good": "G", "waste_kg": "H", "A": "I", "P": "J", "Q": "K", "OEE": "L",
     },
     "Waste": {"code": "A", "desc": "B"},
+    "ใบสั่งผลิต": {
+        "so": "A", "so_date": "B", "due": "C", "customer": "D", "sf": "E", "product": "F",
+        "desc": "G", "qty": "H", "done": "I", "remain": "J", "status": "K", "note": "L",
+    },
+    "ใบสั่งผลิต WIP": {
+        "open_date": "A", "sf": "B", "product": "C", "desc": "D", "qty": "E", "done": "F",
+        "remain": "G", "status": "H", "note": "I",
+    },
+    "Master": {"product": "A", "name": "B", "category": "O"},
 }
 
 PLANNED = "หยุดตามแผน"
@@ -93,7 +103,7 @@ def to_num(s: pd.Series) -> pd.Series:
     return val.astype(float).fillna(0.0)
 
 
-def to_date(s: pd.Series) -> pd.Series:
+def to_date(s: pd.Series, future_days: int | None = 62) -> pd.Series:
     out = pd.Series(pd.NaT, index=s.index, dtype="datetime64[ns]")
     is_dt = s.map(lambda v: isinstance(v, (pd.Timestamp, np.datetime64)) or hasattr(v, "year"))
     if is_dt.any():
@@ -114,7 +124,14 @@ def to_date(s: pd.Series) -> pd.Series:
             y = y.where(y < 2400, y - 543)
             txt.loc[ok] = dmy.loc[ok, 0] + "/" + dmy.loc[ok, 1] + "/" + y.astype(str)
         out[rest] = pd.to_datetime(txt, dayfirst=True, errors="coerce", format="mixed")
-    out[out > pd.Timestamp.today() + pd.Timedelta(days=62)] = pd.NaT
+    # Google Sheets turns a typed "24/10/68" into a real date 24/10/1968 (2-digit Buddhist year
+    # read as 19xx). 19xx + 600 - 543 = +57 years -> 24/10/2025.
+    bad19 = out.dt.year.between(1940, 1999)
+    if bad19.any():
+        out[bad19] = out[bad19] + pd.DateOffset(years=57)
+    out[out < pd.Timestamp("2000-01-01")] = pd.NaT
+    if future_days is not None:
+        out[out > pd.Timestamp.today() + pd.Timedelta(days=future_days)] = pd.NaT
     return out.dt.normalize()
 
 
@@ -239,3 +256,69 @@ def build_total(raw: dict[str, pd.DataFrame]) -> pd.DataFrame | None:
     out = out[out["month"].notna()].copy()
     out["month"] = out["month"].dt.to_period("M").dt.to_timestamp()
     return out.sort_values("month").reset_index(drop=True)
+
+
+# ---------------------------------------------------------------- order tracking
+NO_CATEGORY = "ไม่ระบุหมวด"
+
+
+def _category_map(raw: dict[str, pd.DataFrame]) -> dict[str, str]:
+    """Product code -> category from the Master sheet (column O, header 'หมวด')."""
+    if MASTER_SHEET not in raw:
+        return {}
+    m = raw[MASTER_SHEET]
+    # find the 'หมวด' column by header; fall back to column O
+    header = [to_text(pd.Series([v])).iloc[0] for v in m.iloc[0].tolist()]
+    i = next((k for k, h in enumerate(header) if h.startswith("หมวด")), col_idx(COLS[MASTER_SHEET]["category"]))
+    if i >= m.shape[1]:
+        return {}
+    body = m.iloc[1:]
+    code = to_text(body.iloc[:, 0]).str.upper()
+    cat = to_text(body.iloc[:, i])
+    cat = cat.where(cat == "", cat.map(lambda c: f"หมวด {c}" if c.isdigit() else c))
+    return {k: v for k, v in zip(code, cat) if k and v}
+
+
+def _status(d: pd.DataFrame) -> pd.Series:
+    st = to_text(d["status"]).str.lower()
+    return np.where(st.str.startswith("complete") | (d["remain"] <= 0), "complete", "in progress")
+
+
+def build_orders(raw: dict[str, pd.DataFrame]) -> pd.DataFrame | None:
+    """Sales-order lines from 'ใบสั่งผลิต' with category from Master (None if the sheet is missing)."""
+    if ORDER_SHEET not in raw:
+        return None
+    d = pick(raw[ORDER_SHEET], ORDER_SHEET)
+    out = pd.DataFrame({
+        "so": to_text(d["so"]), "so_date": to_date(d["so_date"], None), "due": to_date(d["due"], None),
+        "customer": to_text(d["customer"]), "sf": to_text(d["sf"]), "product": to_text(d["product"]),
+        "desc": to_text(d["desc"]), "qty": to_num(d["qty"]), "done": to_num(d["done"]),
+        "note": to_text(d["note"]),
+    })
+    rem = to_num(d["remain"])
+    out["remain"] = rem.where(to_text(d["remain"]) != "", (out["qty"] - out["done"]).clip(lower=0))
+    out["status"] = _status(out.assign(status=d["status"].values))
+    out = out[(out["sf"] != "") | (out["product"] != "")].copy()
+    cats = _category_map(raw)
+    out["category"] = out["product"].str.upper().map(cats).fillna(NO_CATEGORY)
+    return out.reset_index(drop=True)
+
+
+def build_wip(raw: dict[str, pd.DataFrame]) -> pd.DataFrame | None:
+    """Work-in-process orders from 'ใบสั่งผลิต WIP' (semi-finished: DT / IS / DTIS ...)."""
+    if WIP_SHEET not in raw:
+        return None
+    d = pick(raw[WIP_SHEET], WIP_SHEET)
+    out = pd.DataFrame({
+        "open_date": to_date(d["open_date"], None), "sf": to_text(d["sf"]), "product": to_text(d["product"]),
+        "desc": to_text(d["desc"]), "qty": to_num(d["qty"]), "done": to_num(d["done"]), "note": to_text(d["note"]),
+    })
+    rem = to_num(d["remain"])
+    out["remain"] = rem.where(to_text(d["remain"]) != "", (out["qty"] - out["done"]).clip(lower=0))
+    out["status"] = _status(out.assign(status=d["status"].values))
+    out = out[(out["sf"] != "") | (out["product"] != "")].copy()
+    # WIP type = letters at the start of the SF number (DT, IS, DTIS ...)
+    out["wip_type"] = out["sf"].str.upper().str.extract(r"^([A-Z]+)", expand=False).fillna("อื่นๆ")
+    cats = _category_map(raw)
+    out["category"] = out["product"].str.upper().map(cats).fillna(NO_CATEGORY)
+    return out.reset_index(drop=True)
