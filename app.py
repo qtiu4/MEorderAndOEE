@@ -12,7 +12,7 @@ import streamlit as st
 import data as D
 
 ASSETS = Path(__file__).parent / "assets"
-LOGO = ASSETS / "makorn_logo.jpg"
+LOGO = ASSETS / "Overal_equipment_effectiveness_software.png"
 LOGO_SMALL = ASSETS / "makorn_logo_small.png"
 st.set_page_config(page_title="OEE Dashboard · Mahanakorn", page_icon=str(LOGO) if LOGO.exists() else "🏭",
                    layout="wide")
