@@ -20,7 +20,7 @@ PCT = ".1%"
 
 # ------------------------------------------------------------------ data
 @st.cache_data(ttl=600, show_spinner="กำลังดึงข้อมูลจาก Google Sheets…")
-def load_events() -> tuple[pd.DataFrame, str]:
+def load_events() -> tuple[pd.DataFrame, pd.DataFrame | None, str]:
     try:
         secrets = dict(st.secrets)
     except Exception:  # noqa: BLE001 - no secrets configured
@@ -30,7 +30,7 @@ def load_events() -> tuple[pd.DataFrame, str]:
         raw = D.load_service_account(sheet_id, dict(secrets["gcp_service_account"]))
     else:
         raw = D.load_public_xlsx(sheet_id)
-    return D.build_events(raw), datetime.now(TH_TZ).strftime("%d/%m/%Y %H:%M")
+    return D.build_events(raw), D.build_total(raw), datetime.now(TH_TZ).strftime("%d/%m/%Y %H:%M")
 
 
 def machine_color_map(machines):
@@ -69,7 +69,7 @@ def fmt_pct(v):
 
 
 try:
-    events, loaded_at = load_events()
+    events, total_sheet, loaded_at = load_events()
 except Exception as e:  # noqa: BLE001
     st.error("ดึงข้อมูลจาก Google Sheets ไม่ได้ ตรวจว่าแชร์ชีตแล้ว หรือใส่ service account ใน Secrets แล้ว")
     st.exception(e)
@@ -107,7 +107,8 @@ cmap = machine_color_map(ev["machine"].unique())
 st.title("OEE Dashboard")
 st.caption(f"{m_from} – {m_to} · {', '.join(sel_machines)}")
 
-tab_oee, tab_loss, tab_waste, tab_data = st.tabs(["OEE", "Time Loss", "Waste", "ตารางข้อมูล"])
+tab_oee, tab_total, tab_loss, tab_waste, tab_data = st.tabs(
+    ["OEE แยกเครื่อง", "OEE รวมรายเดือน", "Time Loss", "Waste", "ตารางข้อมูล"])
 
 # ------------------------------------------------------------------ OEE
 with tab_oee:
@@ -153,6 +154,65 @@ with tab_oee:
                  title="ชั่วโมงทำงานรายเดือน (ทุกเครื่องที่เลือก)")
     fig.update_traces(hovertemplate="%{y:,.1f} ชม.", marker_line_width=0)
     show_chart(c2, style(fig))
+
+# ------------------------------------------------------------------ OEE total (sheet OEE_Total)
+METRIC_COLORS = {"OEE": "#2a78d6", "A": "#eb6834", "P": "#1baf7a", "Q": "#eda100"}
+METRIC_NAMES = {"OEE": "OEE", "A": "Availability", "P": "Performance", "Q": "Quality"}
+with tab_total:
+    if total_sheet is None or total_sheet.empty:
+        st.info("ยังไม่พบชีต OEE_Total ในไฟล์ (ต้องตั้งชื่อชีตว่า OEE_Total)")
+    else:
+        tt = total_sheet[total_sheet["month"].isin(sel_months)]
+        if tt.empty:
+            st.info("ชีต OEE_Total ไม่มีข้อมูลในช่วงเดือนที่เลือก")
+        else:
+            st.caption("ตัวเลขจากชีต OEE_Total: รวมทุกเครื่องในแต่ละเดือนแล้วคำนวณจากยอดรวม "
+                       "(ตัวกรองเครื่องจักรด้านซ้ายไม่มีผลกับแท็บนี้)")
+            last, prev = tt.iloc[-1], (tt.iloc[-2] if len(tt) > 1 else None)
+            st.subheader(f"เดือนล่าสุด: {last['month']:%b %Y}")
+            c = st.columns(4)
+            for col, k in zip(c, ["OEE", "A", "P", "Q"]):
+                delta = None
+                if prev is not None and pd.notna(last[k]) and pd.notna(prev[k]):
+                    delta = f"{(last[k] - prev[k]) * 100:+.1f} จุด จากเดือนก่อน"
+                col.metric(METRIC_NAMES[k], fmt_pct(last[k]), delta)
+
+            long = tt.melt(id_vars="month", value_vars=["OEE", "A", "P", "Q"], var_name="k", value_name="v")
+            long["ตัวชี้วัด"] = long["k"].map(METRIC_NAMES)
+            fig = px.line(long, x="month", y="v", color="ตัวชี้วัด", markers=True,
+                          color_discrete_map={METRIC_NAMES[k]: v for k, v in METRIC_COLORS.items()},
+                          category_orders={"ตัวชี้วัด": list(METRIC_NAMES.values())},
+                          title="OEE / A / P / Q รวมทุกเครื่อง รายเดือน")
+            fig.update_traces(hovertemplate="%{y:.1%}")
+            show_chart(st, style(fig, height=400, pct_axis=True))
+
+            c1, c2 = st.columns(2)
+            fig = px.bar(tt, x="month", y="OEE", title="OEE รวมรายเดือน", text_auto=".1%",
+                         color_discrete_sequence=[METRIC_COLORS["OEE"]])
+            fig.update_traces(hovertemplate="%{y:.1%}<extra></extra>", marker_line_width=0)
+            show_chart(c1, style(fig, pct_axis=True))
+            hrs = tt[["month", "planned_time", "run_time", "ideal_hr"]].rename(columns={
+                "planned_time": "Planned time", "run_time": "Run time", "ideal_hr": "Ideal time"})
+            fig = px.bar(hrs, x="month", y=["Planned time", "Run time", "Ideal time"], barmode="group",
+                         color_discrete_sequence=["#a3a29c", "#eb6834", "#1baf7a"],
+                         title="ชั่วโมงรวมทุกเครื่อง: Planned → Run → Ideal")
+            fig.update_traces(hovertemplate="%{y:,.1f} ชม.", marker_line_width=0)
+            show_chart(c2, style(fig))
+
+            tbl = tt.sort_values("month", ascending=False).copy()
+            tbl["month"] = tbl["month"].dt.strftime("%Y-%m")
+            for k in ["A", "P", "Q", "OEE"]:
+                tbl[k] = (tbl[k] * 100).round(1)
+            tbl = tbl.rename(columns={"month": "เดือน", "machines": "จำนวนเครื่อง", "hours": "ชม.ทำงาน",
+                                      "planned_time": "Planned time", "run_time": "Run time",
+                                      "ideal_hr": "Ideal time", "kg_good": "ผลผลิตดี (kg)",
+                                      "waste_kg": "ของเสีย (kg)"})
+            cfg = {k: st.column_config.NumberColumn(format="%.1f") for k in
+                   ["ชม.ทำงาน", "Planned time", "Run time", "Ideal time", "ของเสีย (kg)"]}
+            cfg.update({"ผลผลิตดี (kg)": st.column_config.NumberColumn(format="%.0f"),
+                        "จำนวนเครื่อง": st.column_config.NumberColumn(format="%d")})
+            cfg.update({k: st.column_config.NumberColumn(f"{k} (%)", format="%.1f%%") for k in ["A", "P", "Q", "OEE"]})
+            st.dataframe(tbl, hide_index=True, column_config=cfg)
 
 # ------------------------------------------------------------------ Time loss
 with tab_loss:

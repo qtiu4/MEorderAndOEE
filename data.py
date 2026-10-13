@@ -14,6 +14,7 @@ import pandas as pd
 DEFAULT_SHEET_ID = "1LKTmEWT3AqRqeecplgLJlmDelN_z-tk9A1JKWEz-XwI"
 
 SHEETS = ["OEE_DATA", "OEE_FORM", "TimeLoss", "Waste"]
+OPTIONAL_SHEETS = ["OEE_Total"]  # used if present; the app still works without it
 
 # Column letters per sheet --------------------------------------------------
 COLS = {
@@ -33,6 +34,10 @@ COLS = {
         "p_hr": "AF", "m": "AH", "kg_good": "AI",
     },
     "TimeLoss": {"code": "A", "desc": "B", "group": "C"},
+    "OEE_Total": {
+        "month": "A", "machines": "B", "hours": "C", "planned_time": "D", "run_time": "E",
+        "ideal_hr": "F", "kg_good": "G", "waste_kg": "H", "A": "I", "P": "J", "Q": "K", "OEE": "L",
+    },
     "Waste": {"code": "A", "desc": "B"},
 }
 
@@ -54,8 +59,9 @@ def load_public_xlsx(sheet_id: str) -> dict[str, pd.DataFrame]:
     url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx"
     with urllib.request.urlopen(url, timeout=120) as r:
         raw = r.read()
-    book = pd.read_excel(io.BytesIO(raw), sheet_name=SHEETS, header=None, dtype=object)
-    return {k: v for k, v in book.items()}
+    xls = pd.ExcelFile(io.BytesIO(raw))
+    wanted = SHEETS + [n for n in OPTIONAL_SHEETS if n in xls.sheet_names]
+    return {n: pd.read_excel(xls, sheet_name=n, header=None, dtype=object) for n in wanted}
 
 
 def load_service_account(sheet_id: str, creds: dict) -> dict[str, pd.DataFrame]:
@@ -65,7 +71,8 @@ def load_service_account(sheet_id: str, creds: dict) -> dict[str, pd.DataFrame]:
     gc = gspread.service_account_from_dict(creds)
     sh = gc.open_by_key(sheet_id)
     out = {}
-    for name in SHEETS:
+    existing = {ws.title for ws in sh.worksheets()}
+    for name in SHEETS + [n for n in OPTIONAL_SHEETS if n in existing]:
         values = sh.worksheet(name).get_all_values(
             value_render_option="UNFORMATTED_VALUE",
             date_time_render_option="SERIAL_NUMBER",
@@ -215,3 +222,20 @@ def oee_table(ev: pd.DataFrame, by: list[str]) -> pd.DataFrame:
 def oee_total(ev: pd.DataFrame) -> pd.Series:
     t = ev[["hours", "planned_hr", "a_hr", "p_hr", "ideal_hr", "m", "kg_good", "waste_kg"]].sum()
     return oee_table(pd.DataFrame([t]).assign(_k=1), ["_k"]).iloc[0]
+
+
+def build_total(raw: dict[str, pd.DataFrame]) -> pd.DataFrame | None:
+    """Monthly all-machine OEE exactly as calculated in the OEE_Total sheet (None if the sheet is missing)."""
+    if "OEE_Total" not in raw:
+        return None
+    d = pick(raw["OEE_Total"], "OEE_Total")
+    out = pd.DataFrame({"month": to_date(d["month"])})
+    for c in ["machines", "hours", "planned_time", "run_time", "ideal_hr", "kg_good", "waste_kg"]:
+        out[c] = to_num(d[c])
+    for c in ["A", "P", "Q", "OEE"]:
+        v = to_num(d[c]).where(to_text(d[c]) != "")
+        # a percent cell exported as 85.8 (not 0.858) -> scale down
+        out[c] = v.where(v.abs() <= 5, v / 100)
+    out = out[out["month"].notna()].copy()
+    out["month"] = out["month"].dt.to_period("M").dt.to_timestamp()
+    return out.sort_values("month").reset_index(drop=True)
