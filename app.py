@@ -139,7 +139,7 @@ def header_bar(subtitle, loaded_at):
         logo_html = f'<div class="cp-logo"><img src="data:image/{mime};base64,{b64}"></div>'
     now = datetime.now(TH_TZ)
     today = f"{now.day} {TH_MONTHS[now.month - 1]} {now.year + 543}"
-    st.markdown(f'<div class="cp-head">{logo_html}<div><div class="cp-title">OEE Operations Cockpit</div>'
+    st.markdown(f'<div class="cp-head">{logo_html}<div><div class="cp-title">OEE Operations</div>'
                 f'<div class="cp-sub">{escape(subtitle)}</div></div>'
                 f'<div class="cp-date">{today}<small>อัปเดตข้อมูล {escape(loaded_at)}</small></div></div>',
                 unsafe_allow_html=True)
