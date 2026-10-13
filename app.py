@@ -264,30 +264,39 @@ with st.sidebar:
     month_labels = [pd.Timestamp(m).strftime("%b %Y") for m in months]
     default_start = max(0, len(months) - 12)
 
-    # Month range: two dropdowns + a slider, kept in sync through session_state.
+    # Month range: two dropdowns + a slider. The chosen range lives in "month_range";
+    # the widgets only report changes through callbacks and are refreshed from it each run.
     ss = st.session_state
-    if ss.get("m_range", (None, None))[0] not in month_labels or ss["m_range"][1] not in month_labels:
-        ss["m_range"] = (month_labels[default_start], month_labels[-1])
-    if ss.get("m_from") not in month_labels or ss.get("m_to") not in month_labels:
-        ss["m_from"], ss["m_to"] = ss["m_range"]
+    rng = ss.get("month_range")
+    if not rng or rng[0] not in month_labels or rng[1] not in month_labels:
+        rng = (month_labels[default_start], month_labels[-1])
+    ss["month_range"] = tuple(rng)
+    ss["w_from"], ss["w_to"] = rng
+    ss["w_range"] = tuple(rng)
+
+    def _set_range(a_label, b_label):
+        if a_label not in month_labels or b_label not in month_labels:
+            return
+        a, b = sorted((month_labels.index(a_label), month_labels.index(b_label)))
+        ss["month_range"] = (month_labels[a], month_labels[b])
 
     def _dropdown_changed():
-        a, b = month_labels.index(ss["m_from"]), month_labels.index(ss["m_to"])
-        if a > b:  # picked "from" after "to" -> swap
-            a, b = b, a
-        ss["m_from"], ss["m_to"] = month_labels[a], month_labels[b]
-        ss["m_range"] = (month_labels[a], month_labels[b])
+        _set_range(ss.get("w_from"), ss.get("w_to"))
 
     def _slider_changed():
-        ss["m_from"], ss["m_to"] = ss["m_range"]
+        v = ss.get("w_range")
+        if isinstance(v, (list, tuple)) and len(v) == 2:
+            _set_range(v[0], v[1])
+        elif v is not None:
+            _set_range(v, v)
 
     st.markdown("**ช่วงเดือน**")
     col_from, col_to = st.columns(2)
-    col_from.selectbox("ตั้งแต่", month_labels, key="m_from", on_change=_dropdown_changed)
-    col_to.selectbox("ถึง", month_labels, key="m_to", on_change=_dropdown_changed)
-    st.select_slider("เลื่อนเลือกช่วงเดือน", options=month_labels, key="m_range",
+    col_from.selectbox("ตั้งแต่", month_labels, key="w_from", on_change=_dropdown_changed)
+    col_to.selectbox("ถึง", month_labels, key="w_to", on_change=_dropdown_changed)
+    st.select_slider("เลื่อนเลือกช่วงเดือน", options=month_labels, key="w_range",
                      on_change=_slider_changed, label_visibility="collapsed")
-    m_from, m_to = ss["m_range"]
+    m_from, m_to = ss["month_range"]
     i_from, i_to = month_labels.index(m_from), month_labels.index(m_to)
     sel_months = months[i_from:i_to + 1]
 
