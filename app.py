@@ -265,37 +265,13 @@ with st.sidebar:
     month_labels = [pd.Timestamp(m).strftime("%b %Y") for m in months]
     default_start = max(0, len(months) - 12)
 
-    # Month range: two dropdowns + a slider. The chosen range lives in "month_range";
-    # the widgets only report changes through callbacks and are refreshed from it each run.
-    ss = st.session_state
-    rng = ss.get("month_range")
-    if not rng or rng[0] not in month_labels or rng[1] not in month_labels:
-        rng = (month_labels[default_start], month_labels[-1])
-    ss["month_range"] = tuple(rng)
-    ss["w_from"], ss["w_to"] = rng
-    ss["w_range"] = tuple(rng)
-
-    def _set_range(a_label, b_label):
-        if a_label not in month_labels or b_label not in month_labels:
-            return
-        a, b = sorted((month_labels.index(a_label), month_labels.index(b_label)))
-        ss["month_range"] = (month_labels[a], month_labels[b])
-
-    def _dropdown_changed():
-        _set_range(ss.get("w_from"), ss.get("w_to"))
-
-    def _slider_changed():
-        v = ss.get("w_range")
-        if isinstance(v, (list, tuple)) and len(v) == 2:
-            _set_range(v[0], v[1])
-        elif v is not None:
-            _set_range(v, v)
-
+    # Month range: two plain dropdowns (no slider, no callbacks).
     st.markdown("**ช่วงเดือน**")
     col_from, col_to = st.columns(2)
-    col_from.selectbox("ตั้งแต่", month_labels, key="w_from", on_change=_dropdown_changed)
-    col_to.selectbox("ถึง", month_labels, key="w_to", on_change=_dropdown_changed)
-    
+    m_from = col_from.selectbox("ตั้งแต่", month_labels, index=default_start, key="month_from")
+    m_to = col_to.selectbox("ถึง", month_labels, index=len(month_labels) - 1, key="month_to")
+    if month_labels.index(m_from) > month_labels.index(m_to):  # picked backwards -> swap
+        m_from, m_to = m_to, m_from
     i_from, i_to = month_labels.index(m_from), month_labels.index(m_to)
     sel_months = months[i_from:i_to + 1]
 
