@@ -295,9 +295,7 @@ with st.sidebar:
     col_from, col_to = st.columns(2)
     col_from.selectbox("ตั้งแต่", month_labels, key="w_from", on_change=_dropdown_changed)
     col_to.selectbox("ถึง", month_labels, key="w_to", on_change=_dropdown_changed)
-    st.select_slider("เลื่อนเลือกช่วงเดือน", options=month_labels, key="w_range",
-                     on_change=_slider_changed, label_visibility="collapsed")
-    m_from, m_to = ss["month_range"]
+    
     i_from, i_to = month_labels.index(m_from), month_labels.index(m_to)
     sel_months = months[i_from:i_to + 1]
 
