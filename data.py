@@ -301,7 +301,19 @@ def build_orders(raw: dict[str, pd.DataFrame]) -> pd.DataFrame | None:
     out = out[(out["sf"] != "") | (out["product"] != "")].copy()
     cats = _category_map(raw)
     out["category"] = out["product"].str.upper().map(cats).fillna(NO_CATEGORY)
+    out["order_type"] = order_type(out["so"])
     return out.reset_index(drop=True)
+
+
+ORDER_CUSTOMER, ORDER_STOCK, ORDER_NO_SO = "ออเดอร์ลูกค้า (SO)", "สต็อก/พยากรณ์ (ST, SK)", "ไม่มีเลข SO"
+
+
+def order_type(so: pd.Series) -> pd.Series:
+    """SO… = real customer order; ST… / SK… = opened for stock / forecast; blank = no SO number.
+    Only customer orders count as 'ค้างส่ง' or 'เลยกำหนดส่ง'."""
+    s = so.fillna("").astype(str).str.strip().str.upper()
+    return pd.Series(np.select([s.str.startswith("SO"), s.str.startswith(("ST", "SK")), s == ""],
+                               [ORDER_CUSTOMER, ORDER_STOCK, ORDER_NO_SO], "อื่นๆ"), index=so.index)
 
 
 def build_wip(raw: dict[str, pd.DataFrame]) -> pd.DataFrame | None:

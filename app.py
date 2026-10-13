@@ -515,8 +515,9 @@ with tab_waste:
         show_chart(c2, fig)
 
 # ------------------------------------------------------------------ Order tracking
-DUE_BUCKETS = ["เลยกำหนดส่ง", "ส่งภายใน 7 วัน", "ส่งเกิน 7 วัน", "ไม่ระบุวันส่ง"]
-DUE_COLORS = dict(zip(DUE_BUCKETS, [RED, GOLD, CYAN, SLATE]))
+STOCK_BUCKET = "ผลิตเข้าสต็อก (ไม่นับค้างส่ง)"
+DUE_BUCKETS = ["เลยกำหนดส่ง", "ส่งภายใน 7 วัน", "ส่งเกิน 7 วัน", "ไม่ระบุวันส่ง", STOCK_BUCKET]
+DUE_COLORS = dict(zip(DUE_BUCKETS, [RED, GOLD, CYAN, SLATE, VIOLET]))
 
 
 def _cat_sort_key(c):
@@ -551,52 +552,67 @@ def order_tab():
             st.info("ไม่พบชีต 'ใบสั่งผลิต' ในไฟล์")
         else:
             o = orders.copy()
-            o["days_left"] = (o["due"] - today).dt.days
+            o["is_cust"] = o["order_type"] == D.ORDER_CUSTOMER
+            o["days_left"] = (o["due"] - today).dt.days.where(o["is_cust"])
+            # Only real customer orders (SO…) get a due status; ST / SK / no-SO are production for stock.
             o["due_bucket"] = np.select(
-                [o["due"].isna(), o["days_left"] < 0, o["days_left"] <= 7],
-                ["ไม่ระบุวันส่ง", "เลยกำหนดส่ง", "ส่งภายใน 7 วัน"], "ส่งเกิน 7 วัน")
+                [~o["is_cust"], o["due"].isna(), o["days_left"] < 0, o["days_left"] <= 7],
+                [STOCK_BUCKET, "ไม่ระบุวันส่ง", "เลยกำหนดส่ง", "ส่งภายใน 7 วัน"], "ส่งเกิน 7 วัน")
             o["pct"] = np.where(o["qty"] > 0, o["done"] / o["qty"] * 100, np.nan)
             cats = sorted(o["category"].unique(), key=_cat_sort_key)
 
-            f1, f2, f3, f4 = st.columns([1.2, 1.4, 1.1, 1.6])
+            f1, f2, f3, f4, f5 = st.columns([1.1, 1.5, 1.3, 1.1, 1.4])
             cat = f1.selectbox("หมวดสินค้า", ["ทุกหมวด"] + cats, key="so_cat")
+            kinds = [k for k in [D.ORDER_CUSTOMER, D.ORDER_STOCK, D.ORDER_NO_SO, "อื่นๆ"]
+                     if (o["order_type"] == k).any()]
+            sel_kind = f2.multiselect("ประเภทใบสั่ง", kinds, placeholder="ทุกประเภท", key="so_kind")
             custs = sorted(c for c in o["customer"].unique() if c)
-            sel_cust = f2.multiselect("ลูกค้า", custs, placeholder="ทุกลูกค้า", key="so_cust")
-            status = f3.radio("สถานะ", ["ค้างส่ง", "ทั้งหมด", "เสร็จแล้ว"], horizontal=True, key="so_status")
-            text = f4.text_input("ค้นหา (SO / SF / รหัส / ชื่อสินค้า)", key="so_search")
+            sel_cust = f3.multiselect("ลูกค้า", custs, placeholder="ทุกลูกค้า", key="so_cust")
+            status = f4.radio("สถานะ", ["ยังไม่ครบ", "ทั้งหมด", "เสร็จแล้ว"], key="so_status")
+            text = f5.text_input("ค้นหา (SO / SF / รหัส / ชื่อ)", key="so_search")
 
-            base = o if not sel_cust else o[o["customer"].isin(sel_cust)]
-            if status == "ค้างส่ง":
+            base = o
+            if sel_kind:
+                base = base[base["order_type"].isin(sel_kind)]
+            if sel_cust:
+                base = base[base["customer"].isin(sel_cust)]
+            if status == "ยังไม่ครบ":
                 base = base[base["status"] != "complete"]
             elif status == "เสร็จแล้ว":
                 base = base[base["status"] == "complete"]
             base = _search(base, text, ["so", "sf", "product", "desc"])
             open_all = base[base["status"] != "complete"]
+            open_cust = open_all[open_all["is_cust"]]          # ค้างส่งลูกค้าจริง
+            open_stock = open_all[~open_all["is_cust"]]        # ค้างผลิตเข้าสต็อก
+            st.caption("ค้างส่ง / เลยกำหนดส่ง นับเฉพาะเลขที่ SO ที่ขึ้นต้นด้วย SO (ออเดอร์ลูกค้า) · "
+                       "ST, SK และใบที่ไม่มีเลข SO นับเป็น 'ค้างผลิตเข้าสต็อก'")
 
             # --- summary by category (always all categories, so they can be compared)
-            section("สรุปค้างส่งแยกหมวด")
+            section("สรุปแยกหมวด")
             if base.empty:
                 st.info("ไม่มีรายการตามตัวกรอง")
             else:
                 # (ASCII names inside agg: Python would alter Thai keyword names)
-                g = base.groupby("category").agg(
-                    n=("sf", "size"), qty=("qty", "sum"), done=("done", "sum"), remain=("remain", "sum"))
-                late = open_all[open_all["due_bucket"] == "เลยกำหนดส่ง"].groupby("category").agg(
-                    late_n=("sf", "size"), late_remain=("remain", "sum"))
-                g = g.join(late).fillna(0).reset_index()
+                g = base.groupby("category").agg(n=("sf", "size"), qty=("qty", "sum"), done=("done", "sum"))
+                g = g.join(open_cust.groupby("category").agg(cust_n=("sf", "size"), cust_remain=("remain", "sum")))
+                late = open_cust[open_cust["due_bucket"] == "เลยกำหนดส่ง"]
+                g = g.join(late.groupby("category").agg(late_n=("sf", "size"), late_remain=("remain", "sum")))
+                g = g.join(open_stock.groupby("category").agg(stock_remain=("remain", "sum")))
+                g = g.fillna(0).reset_index()
                 g["pct"] = np.where(g["qty"] > 0, g["done"] / g["qty"] * 100, np.nan)
                 g = g.sort_values("category", key=lambda c: c.map(_cat_sort_key))[
-                    ["category", "n", "qty", "done", "remain", "pct", "late_n", "late_remain"]]
-                g.columns = ["หมวด", "รายการ", "สั่งผลิต", "ผลิตแล้ว", "ค้างส่ง", "% ผลิตแล้ว",
-                             "เลยกำหนด (รายการ)", "เลยกำหนด (ขด)"]
+                    ["category", "n", "qty", "done", "pct", "cust_n", "cust_remain", "late_n", "late_remain",
+                     "stock_remain"]]
+                g.columns = ["หมวด", "รายการ", "สั่งผลิต", "ผลิตแล้ว", "% ผลิตแล้ว", "ค้างส่งลูกค้า (รายการ)",
+                             "ค้างส่งลูกค้า (ขด)", "เลยกำหนด (รายการ)", "เลยกำหนด (ขด)", "ค้างผลิตเข้าสต็อก (ขด)"]
 
                 c1, c2 = st.columns([3, 2])
                 by = open_all.groupby(["category", "due_bucket"], as_index=False)["remain"].sum()
                 if by.empty:
-                    c1.info("ไม่มีรายการค้างส่ง")
+                    c1.info("ไม่มีรายการค้าง")
                 else:
                     fig = px.bar(by, x="remain", y="category", color="due_bucket", orientation="h",
-                                 color_discrete_map=DUE_COLORS, title="จำนวนค้างส่ง (ขด) แยกหมวด",
+                                 color_discrete_map=DUE_COLORS, title="จำนวนค้าง (ขด) แยกหมวด",
                                  category_orders={"due_bucket": DUE_BUCKETS,
                                                   "category": sorted(by["category"].unique(), key=_cat_sort_key)})
                     fig.update_traces(hovertemplate="%{x:,.0f} ขด<extra>%{fullData.name}</extra>",
@@ -604,62 +620,68 @@ def order_tab():
                     fig.update_layout(hovermode="closest")
                     show_chart(c1, style(fig, height=380).update_xaxes(showgrid=True, gridcolor=GRID)
                                .update_yaxes(showgrid=False))
-                cnt = open_all["due_bucket"].value_counts()
+                cnt = open_cust["due_bucket"].value_counts()
                 order = [b for b in DUE_BUCKETS if cnt.get(b, 0) > 0]
                 if order:
                     fig = donut(order, [int(cnt[b]) for b in order], [DUE_COLORS[b] for b in order],
-                                "รายการค้างส่งตามกำหนดส่ง",
-                                f"{len(open_all):,}<br><span style='font-size:12px;color:{MUTED}'>รายการ</span>",
+                                "ออเดอร์ลูกค้าค้างส่ง ตามกำหนดส่ง",
+                                f"{len(open_cust):,}<br><span style='font-size:12px;color:{MUTED}'>รายการ</span>",
                                 "%{label}: %{value} รายการ (%{percent})<extra></extra>")
                     fig.update_layout(height=380)
                     show_chart(c2, fig)
+                else:
+                    c2.info("ไม่มีออเดอร์ลูกค้า (SO) ค้างส่งตามตัวกรอง")
 
                 st.dataframe(g, hide_index=True, column_config={
                     "% ผลิตแล้ว": st.column_config.ProgressColumn(format="%.0f%%", min_value=0, max_value=100),
-                    **{k: st.column_config.NumberColumn(format="%d") for k in
-                       ["รายการ", "สั่งผลิต", "ผลิตแล้ว", "ค้างส่ง", "เลยกำหนด (รายการ)", "เลยกำหนด (ขด)"]}})
+                    **{k: st.column_config.NumberColumn(format="%d") for k in g.columns
+                       if k not in ("หมวด", "% ผลิตแล้ว")}})
 
             # --- one category in detail
             view = base if cat == "ทุกหมวด" else base[base["category"] == cat]
             open_v = view[view["status"] != "complete"]
+            cust_v = open_v[open_v["is_cust"]]
+            stock_v = open_v[~open_v["is_cust"]]
+            late_v = cust_v[cust_v["due_bucket"] == "เลยกำหนดส่ง"]
+            soon_v = cust_v[cust_v["due_bucket"] == "ส่งภายใน 7 วัน"]
             section(f"รายละเอียด: {cat}")
-            late_v = open_v[open_v["due_bucket"] == "เลยกำหนดส่ง"]
-            soon_v = open_v[open_v["due_bucket"] == "ส่งภายใน 7 วัน"]
             kpi_cards([
-                ("รายการค้างส่ง", f"{len(open_v):,}", f"จาก {len(view):,} รายการที่แสดง", CYAN, "box"),
-                ("ค้างส่ง (ขด)", f"{open_v['remain'].sum():,.0f}", f"สั่งผลิตรวม {view['qty'].sum():,.0f} ขด",
-                 GOLD, "ruler"),
-                ("ผลิตแล้ว", fmt_pct(_pct_done(view["qty"].sum(), view["done"].sum()) / 100),
-                 f"{view['done'].sum():,.0f} ขด", TEAL, "check"),
+                ("ค้างส่งลูกค้า (SO)", f"{cust_v['remain'].sum():,.0f} ขด", f"{len(cust_v):,} รายการ", CYAN, "box"),
                 ("เลยกำหนดส่ง", f"{len(late_v):,} รายการ", f"ค้าง {late_v['remain'].sum():,.0f} ขด", RED, "alert"),
-                ("ส่งภายใน 7 วัน", f"{len(soon_v):,} รายการ", f"ค้าง {soon_v['remain'].sum():,.0f} ขด", VIOLET, "clock"),
+                ("ส่งภายใน 7 วัน", f"{len(soon_v):,} รายการ", f"ค้าง {soon_v['remain'].sum():,.0f} ขด", GOLD, "clock"),
+                ("ค้างผลิตเข้าสต็อก", f"{stock_v['remain'].sum():,.0f} ขด", f"{len(stock_v):,} รายการ (ST / SK / ไม่มี SO)",
+                 VIOLET, "ruler"),
+                ("ผลิตแล้ว", fmt_pct(_pct_done(view["qty"].sum(), view["done"].sum()) / 100),
+                 f"{view['done'].sum():,.0f} จาก {view['qty'].sum():,.0f} ขด", TEAL, "check"),
             ])
 
-            if not open_v.empty:
-                cu = (open_v.groupby("customer", as_index=False)["remain"].sum()
+            if not cust_v.empty:
+                cu = (cust_v.groupby("customer", as_index=False)["remain"].sum()
                       .sort_values("remain", ascending=False).head(10).iloc[::-1])
                 cu["customer"] = cu["customer"].replace("", "(ไม่ระบุ)")
-                fig = px.bar(cu, x="remain", y="customer", orientation="h", title="ค้างส่งแยกลูกค้า (10 อันดับแรก, ขด)")
+                fig = px.bar(cu, x="remain", y="customer", orientation="h",
+                             title="ออเดอร์ลูกค้าค้างส่ง แยกลูกค้า (10 อันดับแรก, ขด)")
                 gradient_bars(fig, cu["remain"])
                 fig.update_traces(hovertemplate="%{x:,.0f} ขด<extra></extra>")
                 fig.update_layout(hovermode="closest")
                 show_chart(st, style(fig, height=max(240, 40 * len(cu) + 90))
                            .update_xaxes(showgrid=True, gridcolor=GRID).update_yaxes(showgrid=False))
 
-            tbl = view.sort_values(["due", "so_date"], na_position="last")
+            # customer orders first (by due date), then stock lines
+            tbl = view.assign(_k=~view["is_cust"]).sort_values(["_k", "due", "so_date"], na_position="last")
             show = pd.DataFrame({
                 "กำหนดส่ง": tbl["due"].dt.strftime("%d/%m/%Y").fillna("–"),
                 "เหลือ (วัน)": tbl["days_left"],
-                "สถานะส่ง": np.where(tbl["status"] == "complete", "ผลิตครบแล้ว", tbl["due_bucket"]),
-                "หมวด": tbl["category"], "ลูกค้า": tbl["customer"], "เลขที่ SO": tbl["so"],
-                "ใบสั่งผลิต (SF)": tbl["sf"], "รหัสสินค้า": tbl["product"], "รายละเอียดสินค้า": tbl["desc"],
-                "สั่งผลิต": tbl["qty"], "ผลิตแล้ว": tbl["done"], "ค้างส่ง": tbl["remain"],
-                "% ผลิตแล้ว": tbl["pct"], "วันที่ SO": tbl["so_date"].dt.strftime("%d/%m/%Y").fillna(""),
-                "หมายเหตุ": tbl["note"]})
+                "สถานะ": np.where(tbl["status"] == "complete", "ผลิตครบแล้ว", tbl["due_bucket"]),
+                "ประเภท": tbl["order_type"], "หมวด": tbl["category"], "ลูกค้า": tbl["customer"],
+                "เลขที่ SO": tbl["so"], "ใบสั่งผลิต (SF)": tbl["sf"], "รหัสสินค้า": tbl["product"],
+                "รายละเอียดสินค้า": tbl["desc"], "สั่งผลิต": tbl["qty"], "ผลิตแล้ว": tbl["done"],
+                "คงเหลือ": tbl["remain"], "% ผลิตแล้ว": tbl["pct"],
+                "วันที่ SO": tbl["so_date"].dt.strftime("%d/%m/%Y").fillna(""), "หมายเหตุ": tbl["note"]})
             st.dataframe(show, hide_index=True, column_config={
                 "% ผลิตแล้ว": st.column_config.ProgressColumn(format="%.0f%%", min_value=0, max_value=100),
                 "เหลือ (วัน)": st.column_config.NumberColumn(format="%d"),
-                **{k: st.column_config.NumberColumn(format="%d") for k in ["สั่งผลิต", "ผลิตแล้ว", "ค้างส่ง"]}})
+                **{k: st.column_config.NumberColumn(format="%d") for k in ["สั่งผลิต", "ผลิตแล้ว", "คงเหลือ"]}})
             st.download_button("ดาวน์โหลด CSV", show.to_csv(index=False).encode("utf-8-sig"),
                                file_name="order_tracking.csv", mime="text/csv", key="so_csv")
 
