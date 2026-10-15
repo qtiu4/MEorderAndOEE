@@ -250,6 +250,25 @@ def fmt_pct(v):
     return "–" if pd.isna(v) else f"{v:.1%}"
 
 
+def _month_txt(s):
+    return pd.to_datetime(s).dt.strftime("%Y-%m")
+
+
+def export_block(title, options, file_prefix, key):
+    """Pick one summary table, preview it, download it as CSV (opens correctly in Excel with Thai text)."""
+    section(title)
+    c1, c2 = st.columns([2, 1])
+    choice = c1.selectbox("เลือกรูปแบบสรุป", list(options), key=f"{key}_pick")
+    df = options[choice]
+    c2.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+    span = f"{pd.Timestamp(sel_months[0]):%Y%m}-{pd.Timestamp(sel_months[-1]):%Y%m}"
+    c2.download_button(f"ดาวน์โหลด CSV ({len(df):,} แถว)", df.to_csv(index=False).encode("utf-8-sig"),
+                       file_name=f"{file_prefix}_{span}.csv", mime="text/csv", key=f"{key}_dl",
+                       disabled=df.empty)
+    st.caption(f"ตามตัวกรองด้านซ้าย: {m_from} – {m_to} · เครื่อง {', '.join(sel_machines)}")
+    st.dataframe(df, hide_index=True, height=min(420, 38 + 35 * max(len(df), 1)))
+
+
 try:
     events, total_sheet, orders, wip, loaded_at = load_events()
 except Exception as e:  # noqa: BLE001
@@ -455,6 +474,44 @@ with tab_loss:
         fig.update_layout(hovermode="closest")
         show_chart(c2, style(fig, height=520))
 
+        # ---- CSV export
+        tot_hr = loss["loss_hr"].sum()
+        by_cause = (loss.groupby(["loss_code", "loss_desc", "loss_group"], as_index=False)
+                    .agg(n=("loss_hr", "size"), hr=("loss_hr", "sum"))
+                    .sort_values("hr", ascending=False))
+        by_cause["pct"] = (by_cause["hr"] / tot_hr * 100).round(2)
+        by_cause["cum"] = (by_cause["hr"].cumsum() / tot_hr * 100).round(2)
+        by_cause["hr"] = by_cause["hr"].round(2)
+        by_cause.columns = ["รหัส", "สาเหตุ", "กลุ่ม", "จำนวนครั้ง", "ชั่วโมง", "% ของทั้งหมด", "% สะสม"]
+
+        mg = loss.pivot_table(index="month", columns="loss_group", values="loss_hr", aggfunc="sum", fill_value=0)
+        mg = mg.reindex(columns=[c for c in ["A", "P", D.PLANNED] if c in mg.columns])
+        mg["รวม"] = mg.sum(axis=1)
+        mg = mg.round(2).reset_index()
+        mg["month"] = _month_txt(mg["month"])
+        mg = mg.rename(columns={"month": "เดือน", "A": "เสีย A (ชม.)", "P": "เสีย P (ชม.)",
+                                D.PLANNED: "หยุดตามแผน (ชม.)", "รวม": "รวม (ชม.)"})
+        mg.columns.name = None
+
+        mc = (loss.groupby(["month", "machine", "loss_code", "loss_desc", "loss_group"], as_index=False)
+              .agg(n=("loss_hr", "size"), hr=("loss_hr", "sum")))
+        mc["month"] = _month_txt(mc["month"]); mc["hr"] = mc["hr"].round(2)
+        mc = mc.sort_values(["month", "machine", "hr"], ascending=[True, True, False])
+        mc.columns = ["เดือน", "เครื่อง", "รหัส", "สาเหตุ", "กลุ่ม", "จำนวนครั้ง", "ชั่วโมง"]
+
+        rows = loss.sort_values(["date", "machine"])
+        rows = pd.DataFrame({"วันที่": rows["date"].dt.strftime("%d/%m/%Y"), "เดือน": _month_txt(rows["month"]),
+                             "เครื่อง": rows["machine"], "SF": rows["sf"], "รหัสสินค้า": rows["product"],
+                             "รหัส": rows["loss_code"], "สาเหตุ": rows["loss_desc"], "กลุ่ม": rows["loss_group"],
+                             "ชั่วโมง": rows["loss_hr"].round(3), "แหล่งข้อมูล": rows["source"]})
+
+        export_block("ดาวน์โหลดสรุป Time Loss", {
+            "สรุปตามสาเหตุ (Pareto)": by_cause,
+            "รายเดือน แยกกลุ่ม A / P / หยุดตามแผน": mg,
+            "รายเดือน แยกเครื่อง และสาเหตุ": mc,
+            "รายการทั้งหมด (ทุกแถวที่บันทึก)": rows,
+        }, "timeloss", "loss_csv")
+
 # ------------------------------------------------------------------ Waste
 with tab_waste:
     w_m = ev.groupby("month", as_index=False)[["m", "kg_good", "waste_kg", "waste_m"]].sum()
@@ -513,6 +570,50 @@ with tab_waste:
                     "%{label}: %{value:,.1f} " + unit + " (%{percent})<extra></extra>")
         fig.update_layout(height=520)
         show_chart(c2, fig)
+
+    # ---- CSV export
+    wmon = w_m[["month", "m", "kg_good", "waste_kg", "waste_m", "% ของเสีย (kg)", "% ของเสีย (m)"]].copy()
+    wmon["month"] = _month_txt(wmon["month"])
+    for c in ["% ของเสีย (kg)", "% ของเสีย (m)"]:
+        wmon[c] = (wmon[c] * 100).round(3)
+    wmon = wmon.round({"m": 0, "kg_good": 2, "waste_kg": 2, "waste_m": 0})
+    wmon.columns = ["เดือน", "ผลผลิต (m)", "ผลผลิตดี (kg)", "ของเสีย (kg)", "ของเสีย (m)", "% ของเสีย (kg)", "% ของเสีย (m)"]
+
+    wmc = ev.groupby(["month", "machine"], as_index=False)[["m", "kg_good", "waste_kg", "waste_m"]].sum()
+    wmc["pct"] = (wmc["waste_kg"] / (wmc["kg_good"] + wmc["waste_kg"]).where(lambda x: x > 0) * 100).round(3)
+    wmc["month"] = _month_txt(wmc["month"])
+    wmc = wmc.round({"m": 0, "kg_good": 2, "waste_kg": 2, "waste_m": 0})
+    wmc.columns = ["เดือน", "เครื่อง", "ผลผลิต (m)", "ผลผลิตดี (kg)", "ของเสีย (kg)", "ของเสีย (m)", "% ของเสีย (kg)"]
+
+    wc = ev[((ev["waste_kg"] > 0) | (ev["waste_m"] > 0)) & (ev["waste_code"] != "")]
+    wcause = (wc.groupby(["waste_code", "waste_desc"], as_index=False)
+              .agg(n=("waste_kg", "size"), kg=("waste_kg", "sum"), mm=("waste_m", "sum"))
+              .sort_values("kg", ascending=False))
+    tkg = wcause["kg"].sum()
+    wcause["pct"] = (wcause["kg"] / tkg * 100).round(2) if tkg > 0 else np.nan
+    wcause = wcause.round({"kg": 2, "mm": 0})
+    wcause.columns = ["รหัส", "สาเหตุ", "จำนวนครั้ง", "ของเสีย (kg)", "ของเสีย (m)", "% ของ kg ทั้งหมด"]
+
+    wtype = ev[(ev["waste_type"] != "") & ((ev["waste_kg"] > 0) | (ev["waste_m"] > 0))]
+    wtype = (wtype.groupby(["month", "waste_type"], as_index=False)[["waste_kg", "waste_m"]].sum()
+             .round({"waste_kg": 2, "waste_m": 0}))
+    wtype["month"] = _month_txt(wtype["month"])
+    wtype.columns = ["เดือน", "ประเภทของเสีย", "ของเสีย (kg)", "ของเสีย (m)"]
+
+    wr = ev[(ev["waste_kg"] > 0) | (ev["waste_m"] > 0)].sort_values(["date", "machine"])
+    wrows = pd.DataFrame({"วันที่": wr["date"].dt.strftime("%d/%m/%Y"), "เดือน": _month_txt(wr["month"]),
+                          "เครื่อง": wr["machine"], "SF": wr["sf"], "รหัสสินค้า": wr["product"],
+                          "ประเภท": wr["waste_type"], "รหัส": wr["waste_code"], "สาเหตุ": wr["waste_desc"],
+                          "ของเสีย (kg)": wr["waste_kg"].round(3), "ของเสีย (m)": wr["waste_m"].round(1),
+                          "แหล่งข้อมูล": wr["source"]})
+
+    export_block("ดาวน์โหลดสรุป Waste", {
+        "รายเดือน (ผลผลิต / ของเสีย / %)": wmon,
+        "รายเดือน แยกเครื่อง": wmc,
+        "สรุปตามสาเหตุ (Pareto)": wcause,
+        "รายเดือน แยกประเภท (CU / PVC / SL / Wire)": wtype,
+        "รายการทั้งหมด (ทุกแถวที่มีของเสีย)": wrows,
+    }, "waste", "waste_csv")
 
 # ------------------------------------------------------------------ Order tracking
 STOCK_BUCKET = "ผลิตเข้าสต็อก (ไม่นับค้างส่ง)"
