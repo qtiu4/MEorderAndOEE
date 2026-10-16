@@ -296,9 +296,13 @@ with st.sidebar:
     i_from, i_to = month_labels.index(m_from), month_labels.index(m_to)
     sel_months = months[i_from:i_to + 1]
 
-    exclude = st.toggle("ไม่รวม SF ที่ขึ้นต้นด้วย IS", value=True,
-                        help="ตรงกับวิธีคิด OEE ในชีต OEE_Monthly")
-    pool = events[~events["excluded"]] if exclude else events
+    exclude = st.toggle("ไม่นับเมตรผลิตของ SF ที่ขึ้นต้นด้วย IS", value=True,
+                        help="ตัดเฉพาะยอดผลผลิต (m) ของ SF ที่ขึ้นต้นด้วย IS · ชั่วโมงทำงาน เวลาสูญเสีย "
+                             "Ideal time ของเสีย และ OEE ยังรวม IS เสมอ")
+    # IS rows always count for time / OEE; only their metres are left out of the output total.
+    pool = events.copy()
+    if exclude:
+        pool["m"] = pool["m"].where(~pool["excluded"], 0.0)
     all_machines = sorted(m for m in pool["machine"].unique() if m)
     sel_machines = st.multiselect("เครื่องจักร", all_machines, default=all_machines)
 
