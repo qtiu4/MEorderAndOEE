@@ -272,7 +272,7 @@ def pareto_chart(df, code, desc, val, unit, title, top=15, group=None, colors=No
     head["cum"] = head[val].cumsum() / total * 100
     # "vital few" = causes needed to reach the cut-off (the one crossing it included)
     head["vital"] = ((head["cum"] - head["pct"]) < cutoff - 1e-9) & (head[code] != "อื่นๆ")
-    labels = [f"{c}<br>{_short(t)}" if c != "อื่นๆ" else f"อื่นๆ<br>({t})" for c, t in zip(head[code], head[desc])]
+    labels = [f"{c} {_short(t, 20)}" if c != "อื่นๆ" else f"อื่นๆ ({t})" for c, t in zip(head[code], head[desc])]
     if group:
         bar_col = [colors.get(g, SLATE) if g != "อื่นๆ" else SLATE for g in head[group]]
     else:
@@ -294,19 +294,19 @@ def pareto_chart(df, code, desc, val, unit, title, top=15, group=None, colors=No
                 fig.add_trace(go.Bar(x=[None], y=[None], name=g, marker_color=c, hoverinfo="skip"))
     fig.add_shape(type="line", xref="paper", x0=0, x1=1, yref="y2", y0=cutoff, y1=cutoff,
                   line=dict(color=RED, width=1.4, dash="dash"))
-    fig.add_annotation(xref="paper", x=1, yref="y2", y=cutoff, text=f"{cutoff}%", showarrow=False,
-                       xanchor="left", font=dict(color=RED, size=11))
+    fig.add_annotation(xref="paper", x=0.995, yref="y2", y=cutoff, text=f"เส้นตัด {cutoff}%", showarrow=False,
+                       xanchor="right", yanchor="bottom", font=dict(color=RED, size=11))
     n_vital = int(head["vital"].sum())
     if 0 < n_vital < len(head):
         fig.add_shape(type="line", xref="x", x0=n_vital - 0.5, x1=n_vital - 0.5, yref="paper", y0=0, y1=1,
                       line=dict(color=_rgba(RED, .55), width=1.2, dash="dot"))
-    style(fig, height=470)
+    style(fig, height=540)
     fig.update_layout(title=dict(text=f"{title} · {n_vital} สาเหตุแรก = {cutoff}% ของทั้งหมด"),
-                      margin=dict(l=8, r=48, t=52, b=36), hovermode="x unified", bargap=0.18,
+                      margin=dict(l=8, r=60, t=64, b=20), hovermode="x unified", bargap=0.18,
                       yaxis2=dict(overlaying="y", side="right", range=[0, 105], ticksuffix="%", showgrid=False,
-                                  zeroline=False, tickfont=dict(color=GOLD), dtick=20),
-                      legend=dict(y=-0.28))
-    fig.update_xaxes(tickfont=dict(size=10, color=MUTED), tickangle=0)
+                                  zeroline=False, tickfont=dict(color=GOLD, size=11), dtick=20, automargin=True),
+                      legend=dict(orientation="h", x=1, xanchor="right", y=1.0, yanchor="bottom"))
+    fig.update_xaxes(tickfont=dict(size=11, color=MUTED), tickangle=-40, automargin=True)
     tbl = head[[code, desc, val, "pct", "cum", "vital"]].copy()
     return fig, tbl
 
@@ -617,18 +617,20 @@ with tab_waste:
     unit = st.radio("Pareto สาเหตุของเสีย ตาม", ["kg", "m"], horizontal=True)
     val = "waste_kg" if unit == "kg" else "waste_m"
     wst = ev[(ev[val] > 0) & (ev["waste_code"] != "")]
+    wt = ev[(ev["waste_type"] != "") & (ev[val] > 0)]
     if wst.empty:
         st.info("ไม่มีข้อมูลของเสียที่มีรหัสสาเหตุ")
-        c1, c2 = st.columns([3, 2])
     else:
         fig, ptbl = pareto_chart(wst, "waste_code", "waste_desc", val, unit, f"Pareto สาเหตุของเสีย ({unit})")
         show_chart(st, fig)
-        c1, c2 = st.columns([3, 2])
-        vital_table(c1, ptbl, "waste_code", "waste_desc", val, unit)
-    wt = ev[(ev["waste_type"] != "") & (ev[val] > 0)]
-    if wt.empty:
-        c2.info("ประเภทของเสีย (CU / PVC / SL / Wire) มีเฉพาะข้อมูลจากฟอร์ม")
-    else:
+        # donut by waste type only when the form has that data; otherwise the table uses the full width
+        tcol, dcol = st.columns([3, 2]) if not wt.empty else (st.container(), None)
+        vital_table(tcol, ptbl, "waste_code", "waste_desc", val, unit)
+        if wt.empty:
+            st.caption("ประเภทของเสีย (CU / PVC / SL / Wire) มีเฉพาะข้อมูลที่บันทึกผ่านฟอร์ม – ช่วงที่เลือกยังไม่มี")
+    if not wt.empty:
+        if wst.empty:
+            dcol = st.container()
         t = wt.groupby("waste_type", as_index=False)[val].sum().sort_values(val, ascending=False)
         palette = [CYAN, GOLD, VIOLET, TEAL, PINK, BLUE, RED]
         fig = donut(t["waste_type"].tolist(), t[val].tolist(), palette[:len(t)],
@@ -636,7 +638,7 @@ with tab_waste:
                     f"{t[val].sum():,.0f}<br><span style='font-size:12px;color:{MUTED}'>{unit}</span>",
                     "%{label}: %{value:,.1f} " + unit + " (%{percent})<extra></extra>")
         fig.update_layout(height=420)
-        show_chart(c2, fig)
+        show_chart(dcol, fig)
 
     # ---- CSV export
     wmon = w_m[["month", "m", "kg_good", "waste_kg", "waste_m", "% ของเสีย (kg)", "% ของเสีย (m)"]].copy()
