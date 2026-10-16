@@ -250,6 +250,80 @@ def fmt_pct(v):
     return "–" if pd.isna(v) else f"{v:.1%}"
 
 
+def _short(t, n=14):
+    t = str(t).strip()
+    return t if len(t) <= n else t[:n].rstrip() + "…"
+
+
+def pareto_chart(df, code, desc, val, unit, title, top=15, group=None, colors=None, cutoff=80):
+    """Real Pareto: bars sorted high→low, cumulative % line on the right axis, dashed cut-off at 80%.
+    Causes beyond `top` are merged into one 'อื่นๆ' bar so the line ends at 100%.
+    Returns (figure, table with % and cumulative %)."""
+    keys = [code, desc] + ([group] if group else [])
+    d = df.groupby(keys, as_index=False)[val].sum()
+    d = d[d[val] > 0].sort_values(val, ascending=False)
+    total = d[val].sum()
+    head, rest = d.head(top).copy(), d.iloc[top:]
+    if len(rest):
+        other = {code: "อื่นๆ", desc: f"อีก {len(rest)} สาเหตุ", val: rest[val].sum()}
+        if group: other[group] = "อื่นๆ"
+        head = pd.concat([head, pd.DataFrame([other])], ignore_index=True)
+    head["pct"] = head[val] / total * 100
+    head["cum"] = head[val].cumsum() / total * 100
+    # "vital few" = causes needed to reach the cut-off (the one crossing it included)
+    head["vital"] = ((head["cum"] - head["pct"]) < cutoff - 1e-9) & (head[code] != "อื่นๆ")
+    labels = [f"{c}<br>{_short(t)}" if c != "อื่นๆ" else f"อื่นๆ<br>({t})" for c, t in zip(head[code], head[desc])]
+    if group:
+        bar_col = [colors.get(g, SLATE) if g != "อื่นๆ" else SLATE for g in head[group]]
+    else:
+        bar_col = [CYAN if v else SLATE for v in head["vital"]]
+    opac = [1.0 if v else 0.45 for v in head["vital"]]
+    custom = np.stack([head[desc].astype(str), head["pct"], head["cum"]], axis=-1)
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=labels, y=head[val], name=unit, marker=dict(color=bar_col, opacity=opac, line=dict(width=0)),
+                         customdata=custom, showlegend=False,
+                         hovertemplate="<b>%{customdata[0]}</b><br>%{y:,.1f} " + unit +
+                                       " · %{customdata[1]:.1f}%<extra></extra>"))
+    fig.add_trace(go.Scatter(x=labels, y=head["cum"], name="% สะสม", yaxis="y2", mode="lines+markers",
+                             line=dict(color=GOLD, width=2.4), marker=dict(size=7, color=GOLD,
+                             line=dict(color="#0f1a3d", width=1.5)),
+                             hovertemplate="สะสม %{y:.1f}%<extra></extra>"))
+    if group:   # legend entries for the bar colours
+        for g, c in colors.items():
+            if (head[group] == g).any():
+                fig.add_trace(go.Bar(x=[None], y=[None], name=g, marker_color=c, hoverinfo="skip"))
+    fig.add_shape(type="line", xref="paper", x0=0, x1=1, yref="y2", y0=cutoff, y1=cutoff,
+                  line=dict(color=RED, width=1.4, dash="dash"))
+    fig.add_annotation(xref="paper", x=1, yref="y2", y=cutoff, text=f"{cutoff}%", showarrow=False,
+                       xanchor="left", font=dict(color=RED, size=11))
+    n_vital = int(head["vital"].sum())
+    if 0 < n_vital < len(head):
+        fig.add_shape(type="line", xref="x", x0=n_vital - 0.5, x1=n_vital - 0.5, yref="paper", y0=0, y1=1,
+                      line=dict(color=_rgba(RED, .55), width=1.2, dash="dot"))
+    style(fig, height=470)
+    fig.update_layout(title=dict(text=f"{title} · {n_vital} สาเหตุแรก = {cutoff}% ของทั้งหมด"),
+                      margin=dict(l=8, r=48, t=52, b=36), hovermode="x unified", bargap=0.18,
+                      yaxis2=dict(overlaying="y", side="right", range=[0, 105], ticksuffix="%", showgrid=False,
+                                  zeroline=False, tickfont=dict(color=GOLD), dtick=20),
+                      legend=dict(y=-0.28))
+    fig.update_xaxes(tickfont=dict(size=10, color=MUTED), tickangle=0)
+    tbl = head[[code, desc, val, "pct", "cum", "vital"]].copy()
+    return fig, tbl
+
+
+def vital_table(container, tbl, code, desc, val, unit, cutoff=80):
+    v = tbl[tbl["vital"]].copy()
+    section(f"สาเหตุหลักที่รวมกันถึง {cutoff}%", container)
+    if v.empty:
+        container.info("ไม่มีข้อมูล"); return
+    out = pd.DataFrame({"รหัส": v[code], "สาเหตุ": v[desc], unit: v[val].round(2),
+                        "%": v["pct"].round(1), "% สะสม": v["cum"].round(1)})
+    container.dataframe(out, hide_index=True, column_config={
+        unit: st.column_config.NumberColumn(format="%.1f"),
+        "%": st.column_config.NumberColumn(format="%.1f%%"),
+        "% สะสม": st.column_config.ProgressColumn(format="%.0f%%", min_value=0, max_value=100)})
+
+
 def _month_txt(s):
     return pd.to_datetime(s).dt.strftime("%Y-%m")
 
@@ -457,26 +531,20 @@ with tab_loss:
                     "%{label}: %{value:,.1f} ชม. (%{percent})<extra></extra>")
         show_chart(c2, fig)
 
-        c1, c2 = st.columns([3, 2])
-        incl_planned = c1.checkbox("รวมหยุดตามแผนใน Pareto", value=False)
+        incl_planned = st.checkbox("รวมหยุดตามแผนใน Pareto", value=False)
         par = loss if incl_planned else loss[loss["loss_group"] != D.PLANNED]
-        top = (par.groupby(["loss_code", "loss_desc", "loss_group"], as_index=False)["loss_hr"].sum()
-               .sort_values("loss_hr", ascending=False).head(15))
-        top["label"] = top["loss_code"] + " " + top["loss_desc"]
-        top["สะสม"] = top["loss_hr"].cumsum() / par["loss_hr"].sum()
-        fig = px.bar(top.iloc[::-1], x="loss_hr", y="label", orientation="h", color="loss_group",
-                     color_discrete_map=GROUP_COLORS, title="Pareto สาเหตุเวลาสูญเสีย (15 อันดับแรก)",
-                     custom_data=["สะสม"])
-        fig.update_traces(hovertemplate="%{x:,.1f} ชม. · สะสม %{customdata[0]:.0%}<extra></extra>", marker_line_width=0)
-        fig.update_layout(hovermode="closest")
-        show_chart(c1, style(fig, height=520).update_xaxes(showgrid=True, gridcolor=GRID).update_yaxes(showgrid=False))
+        fig, ptbl = pareto_chart(par, "loss_code", "loss_desc", "loss_hr", "ชม.", "Pareto สาเหตุเวลาสูญเสีย",
+                                 group="loss_group", colors=GROUP_COLORS)
+        show_chart(st, fig)
 
+        c1, c2 = st.columns([3, 2])
+        vital_table(c1, ptbl, "loss_code", "loss_desc", "loss_hr", "ชม.")
         bym = loss.groupby(["machine", "loss_group"], as_index=False)["loss_hr"].sum()
         fig = px.bar(bym, x="machine", y="loss_hr", color="loss_group", color_discrete_map=GROUP_COLORS,
                      category_orders={"loss_group": ["A", "P", D.PLANNED]}, title="เวลาสูญเสียแยกเครื่อง")
         fig.update_traces(hovertemplate="%{y:,.1f} ชม.", marker_line_width=0)
         fig.update_layout(hovermode="closest")
-        show_chart(c2, style(fig, height=520))
+        show_chart(c2, style(fig, height=420))
 
         # ---- CSV export
         tot_hr = loss["loss_hr"].sum()
@@ -549,19 +617,14 @@ with tab_waste:
     unit = st.radio("Pareto สาเหตุของเสีย ตาม", ["kg", "m"], horizontal=True)
     val = "waste_kg" if unit == "kg" else "waste_m"
     wst = ev[(ev[val] > 0) & (ev["waste_code"] != "")]
-    c1, c2 = st.columns([3, 2])
     if wst.empty:
-        c1.info("ไม่มีข้อมูลของเสียที่มีรหัสสาเหตุ")
+        st.info("ไม่มีข้อมูลของเสียที่มีรหัสสาเหตุ")
+        c1, c2 = st.columns([3, 2])
     else:
-        top = (wst.groupby(["waste_code", "waste_desc"], as_index=False)[val].sum()
-               .sort_values(val, ascending=False).head(15))
-        top["label"] = top["waste_code"] + " " + top["waste_desc"]
-        top = top.iloc[::-1]
-        fig = px.bar(top, x=val, y="label", orientation="h", title=f"Pareto สาเหตุของเสีย ({unit})")
-        gradient_bars(fig, top[val])
-        fig.update_traces(hovertemplate="%{x:,.1f} " + unit + "<extra></extra>")
-        fig.update_layout(hovermode="closest")
-        show_chart(c1, style(fig, height=520).update_xaxes(showgrid=True, gridcolor=GRID).update_yaxes(showgrid=False))
+        fig, ptbl = pareto_chart(wst, "waste_code", "waste_desc", val, unit, f"Pareto สาเหตุของเสีย ({unit})")
+        show_chart(st, fig)
+        c1, c2 = st.columns([3, 2])
+        vital_table(c1, ptbl, "waste_code", "waste_desc", val, unit)
     wt = ev[(ev["waste_type"] != "") & (ev[val] > 0)]
     if wt.empty:
         c2.info("ประเภทของเสีย (CU / PVC / SL / Wire) มีเฉพาะข้อมูลจากฟอร์ม")
@@ -572,7 +635,7 @@ with tab_waste:
                     f"ของเสียแยกประเภท ({unit}) — ข้อมูลจากฟอร์ม",
                     f"{t[val].sum():,.0f}<br><span style='font-size:12px;color:{MUTED}'>{unit}</span>",
                     "%{label}: %{value:,.1f} " + unit + " (%{percent})<extra></extra>")
-        fig.update_layout(height=520)
+        fig.update_layout(height=420)
         show_chart(c2, fig)
 
     # ---- CSV export
